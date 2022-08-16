@@ -2,6 +2,7 @@ package rabbit_template
 
 import (
 	"errors"
+	"fmt"
 	"github.com/rabbitmq/amqp091-go"
 	"log"
 	"sync"
@@ -15,14 +16,20 @@ type PoolChannel struct {
 	freeChannel chan *PoolChannel //已经释放的信道会被放入
 }
 
-func (channel *PoolChannel) Close() {
+func (channel *PoolChannel) Close() (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			log.Println(r)
+			if er, ok := r.(error); ok {
+				err = er
+			} else {
+				err = errors.New(fmt.Sprintf("close channel %v failed", channel))
+			}
 		}
 	}()
 	channel.isFree = true
 	channel.freeChannel <- channel
+	return
 }
 
 // ChannelPool 信道连接池
@@ -106,7 +113,7 @@ func (pool *ChannelPool) GetChannel() *PoolChannel {
 }
 
 // Close 关闭连接池
-func (pool *ChannelPool) Close() {
+func (pool *ChannelPool) Close() (err error) {
 	pool.mux.Lock()
 	defer pool.mux.Unlock()
 	pool.isClosed = true
@@ -114,9 +121,10 @@ func (pool *ChannelPool) Close() {
 	//强制关闭全部信道
 	for _, channel := range pool.channels {
 		if channel != nil {
-			if err := channel.channel.Close(); err != nil {
-				log.Println(err)
+			if e := channel.channel.Close(); e != nil {
+				log.Println(e)
 			}
 		}
 	}
+	return
 }
