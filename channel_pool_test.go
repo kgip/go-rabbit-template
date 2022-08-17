@@ -19,7 +19,7 @@ func TestChannel(t *testing.T) {
 	wg.Add(5000)
 	for i := 0; i < 5000; i++ {
 		go func() {
-			channel := pool.GetChannel()
+			channel, _ := pool.GetChannel()
 			if channel != nil {
 				channel.channel.PublishWithContext(context.Background(),
 					exchange, key, true, false,

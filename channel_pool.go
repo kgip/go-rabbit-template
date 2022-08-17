@@ -23,7 +23,7 @@ func (channel *PoolChannel) Close() (err error) {
 			if er, ok := r.(error); ok {
 				err = er
 			} else {
-				err = errors.New(fmt.Sprintf("close channel %v failed", channel))
+				err = errors.New(fmt.Sprintf("failed to close channel %v", channel))
 			}
 		}
 	}()
@@ -36,17 +36,24 @@ func (channel *PoolChannel) Close() (err error) {
 type ChannelPool struct {
 	conn            *amqp091.Connection
 	channels        []*PoolChannel
-	maxChannelCount int64 //最大信道数量
-	channelCount    int64 //当前信道数量
+	maxChannelCount int //最大信道数量
+	channelCount    int //当前信道数量
 	mux             *sync.Mutex
 	timeout         time.Duration     //获取信道的超时时间
 	freeChannel     chan *PoolChannel //已经释放的信道会被放入
 	isClosed        bool              //连接池是否关闭
 }
 
-func NewChannelPool(conn *amqp091.Connection, maxChannelCount int64, timeout time.Duration) (*ChannelPool, error) {
+// NewChannelPool 创建一个连接池
+// conn amqp连接
+// maxChannelCount 连接池最大连接数
+// timeout 获取连接的
+func NewChannelPool(conn *amqp091.Connection, maxChannelCount int, timeout time.Duration) (*ChannelPool, error) {
 	if conn == nil {
-		return nil, errors.New("connection is nil")
+		return nil, errors.New("'conn' is nil")
+	}
+	if maxChannelCount <= 0 {
+		return nil, errors.New("'maxChannelCount' is less than 0")
 	}
 	return &ChannelPool{conn: conn,
 		maxChannelCount: maxChannelCount,
@@ -57,9 +64,19 @@ func NewChannelPool(conn *amqp091.Connection, maxChannelCount int64, timeout tim
 }
 
 // GetChannel 从连接池获取信道
-func (pool *ChannelPool) GetChannel() *PoolChannel {
+func (pool *ChannelPool) GetChannel() (ch *PoolChannel, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Println(r)
+			if er, ok := r.(error); ok {
+				err = er
+			} else {
+				err = errors.New("failed to acquire channel")
+			}
+		}
+	}()
 	if pool.isClosed {
-		return nil
+		return nil, errors.New("pool is closed")
 	}
 	//先尝试获取空闲信道，如果获取到了直接返回
 	select {
@@ -67,21 +84,22 @@ func (pool *ChannelPool) GetChannel() *PoolChannel {
 		if freeChannel != nil {
 			freeChannel.isFree = false
 		}
-		return freeChannel
+		return freeChannel, nil
 	default:
 	}
 	pool.mux.Lock()
 	defer pool.mux.Unlock()
 	if pool.isClosed {
-		return nil
+		return nil, errors.New("pool is closed")
 	}
 	//创建的信道数量没有达到最大,创建新的信道
 	if pool.maxChannelCount > pool.channelCount {
+		var originChannel *amqp091.Channel
 		//根据连创建一个信道
-		originChannel, err := pool.conn.Channel()
+		originChannel, err = pool.conn.Channel()
 		if err != nil {
 			log.Println(err)
-			return nil
+			return nil, err
 		}
 		channel := &PoolChannel{
 			channel:     originChannel,
@@ -90,12 +108,12 @@ func (pool *ChannelPool) GetChannel() *PoolChannel {
 		}
 		pool.channels[pool.channelCount] = channel
 		pool.channelCount++
-		return channel
+		return channel, nil
 	}
 	pool.mux.Unlock()
 	//无超时限制
 	if pool.timeout < 0 {
-		return <-pool.freeChannel
+		return <-pool.freeChannel, err
 	}
 	//从已创建的信道中获取空闲的信道，最多等待30s
 	timer := time.NewTimer(pool.timeout)
@@ -105,9 +123,9 @@ func (pool *ChannelPool) GetChannel() *PoolChannel {
 			if freeChannel != nil {
 				freeChannel.isFree = false
 			}
-			return freeChannel
+			return freeChannel, nil
 		case <-timer.C:
-			return nil
+			return nil, errors.New("acquire channel timeout")
 		}
 	}
 }
