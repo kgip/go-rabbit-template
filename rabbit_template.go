@@ -1,15 +1,20 @@
 package rabbit_template
 
 import (
+	"context"
 	"crypto/tls"
+	"fmt"
+	"github.com/patrickmn/go-cache"
 	"github.com/rabbitmq/amqp091-go"
 	"net"
-	"sync"
 	"time"
 )
 
 const (
-	defaultPoolChannelMax = 200
+	defaultPoolChannelMax        = 200
+	defaultCorrelationDataExpire = 30 * time.Minute
+
+	NoExpire = -1
 
 	// Constants for standard AMQP 0-9-1 exchange types.
 	ExchangeDirect  = "direct"
@@ -20,8 +25,9 @@ const (
 
 // CorrelationData 每个消息附带的额外信息
 type CorrelationData struct {
-	ID   string
-	Data interface{}
+	ID     string
+	Data   interface{}
+	Expire time.Duration
 }
 
 // Authentication interface provides a means for different SASL authentication
@@ -84,6 +90,7 @@ type Config struct {
 	EnablePublisherReturns bool
 	PoolChannelMax         int           //连接池最大channel数
 	Timeout                time.Duration //连接获取超时时间，小于0时无超时限制
+	CorrelationDataExpire  time.Duration
 }
 
 // Return captures a flattened struct of fields returned by the server when a
@@ -174,16 +181,43 @@ type Delivery struct {
 	Body []byte
 }
 
+// Message captures the client message sent to the server.  The fields
+// outside of the Headers table included in this struct mirror the underlying
+// fields in the content frame.  They use native types for convenience and
+// efficiency.
+type Message struct {
+	// Application or exchange specific fields,
+	// the headers exchange will inspect this field.
+	Headers map[string]interface{}
+
+	// Properties
+	ContentType     string    // MIME content type
+	ContentEncoding string    // MIME content encoding
+	DeliveryMode    uint8     // Transient (0 or 1) or Persistent (2)
+	Priority        uint8     // 0 to 9
+	CorrelationId   string    // correlation identifier
+	ReplyTo         string    // address to to reply to (ex: RPC)
+	Expiration      string    // message expiration spec
+	MessageId       string    // message identifier
+	Timestamp       time.Time // message timestamp
+	Type            string    // message type name
+	UserId          string    // creating user id - ex: "guest"
+	AppId           string    // creating application id
+
+	// The application specific payload of the message
+	Body []byte
+}
+
 // RabbitTemplate RabbitMQ操作工具
 type RabbitTemplate struct {
-	url                string                                                              //amqp服务器连接地址
-	config             *Config                                                             //配置信息
-	connection         *amqp091.Connection                                                 //生产者连接
-	channelPool        *ChannelPool                                                        //信道池，用于根据连接创建信道
-	confirmCallback    func(ack bool, DeliveryTag int64, correlationData *CorrelationData) //确认回调
-	returnCallback     func(r *Return)                                                     //返回回调
-	correlationDataMap *sync.Map                                                           //存储每个channel每个消息对应的CorrelationData
-	consumerCallbacks  []func(delivery *Delivery)                                          //消费者回调
+	url                  string                                                              //amqp服务器连接地址
+	config               *Config                                                             //配置信息
+	connection           *amqp091.Connection                                                 //生产者连接
+	channelPool          *ChannelPool                                                        //信道池，用于根据连接创建信道
+	confirmCallback      func(ack bool, DeliveryTag int64, correlationData *CorrelationData) //确认回调
+	returnCallback       func(r *Return)                                                     //返回回调
+	correlationDataCache *cache.Cache                                                        //存储每个channel每个消息对应的CorrelationData
+	consumerCallbacks    []func(delivery *Delivery)                                          //消费者回调
 }
 
 func NewRabbitTemplate(url string, config Config) (*RabbitTemplate, error) {
@@ -218,12 +252,20 @@ func NewRabbitTemplate(url string, config Config) (*RabbitTemplate, error) {
 		return nil, err
 	}
 
+	correlationDataExpire := config.CorrelationDataExpire
+	if correlationDataExpire < 0 {
+		correlationDataExpire = defaultCorrelationDataExpire
+	} else if correlationDataExpire == 0 {
+		correlationDataExpire = cache.NoExpiration
+	} else {
+		correlationDataExpire = config.CorrelationDataExpire
+	}
 	return &RabbitTemplate{
-		url:                url,
-		connection:         connection,
-		channelPool:        pool,
-		config:             &config,
-		correlationDataMap: &sync.Map{},
+		url:                  url,
+		connection:           connection,
+		channelPool:          pool,
+		config:               &config,
+		correlationDataCache: cache.New(correlationDataExpire, 2*correlationDataExpire),
 	}, nil
 }
 
@@ -253,4 +295,86 @@ func (template *RabbitTemplate) QueueBind(name, key, exchange string, noWait boo
 	}
 	defer channel.Close()
 	return channel.channel.QueueBind(name, key, exchange, noWait, args)
+}
+
+func (template *RabbitTemplate) Publish(exchange, key string, mandatory, immediate bool, msg *Message, correlationData *CorrelationData) error {
+	channel, err := template.channelPool.GetChannel()
+	if err != nil {
+		return err
+	}
+	defer channel.Close()
+	if err = channel.channel.PublishWithContext(context.Background(), exchange, key, mandatory, immediate, amqp091.Publishing{
+		Headers:         msg.Headers,
+		ContentType:     msg.ContentType,
+		ContentEncoding: msg.ContentEncoding,
+		DeliveryMode:    msg.DeliveryMode,
+		Priority:        msg.Priority,
+		CorrelationId:   msg.CorrelationId,
+		ReplyTo:         msg.ReplyTo,
+		Expiration:      msg.Expiration,
+		MessageId:       msg.MessageId,
+		Timestamp:       msg.Timestamp,
+		Type:            msg.Type,
+		UserId:          msg.UserId,
+		AppId:           msg.AppId,
+		Body:            msg.Body,
+	}); err != nil {
+		return err
+	} else {
+		if template.config.EnablePublisherConfirm && template.confirmCallback != nil {
+			if channel.confirmChan == nil {
+				func() {
+					channel.mutex.Lock()
+					defer channel.mutex.Unlock()
+					if channel.confirmChan == nil {
+						channel.confirmChan = channel.channel.NotifyPublish(make(chan amqp091.Confirmation, 1))
+					}
+				}()
+			}
+			//生成缓存key
+			cachedCorrelationDataKey := fmt.Sprintf("%v-%d", channel.confirmChan, channel.channel.GetNextPublishSeqNo()-1)
+			//缓存correlationData
+			if correlationData.Expire <= 0 {
+				template.correlationDataCache.SetDefault(cachedCorrelationDataKey, correlationData)
+			} else {
+				template.correlationDataCache.Set(cachedCorrelationDataKey, correlationData, correlationData.Expire)
+			}
+		}
+		if template.config.EnablePublisherReturns && template.returnCallback != nil {
+			if channel.returnChan == nil {
+				func() {
+					channel.mutex.Lock()
+					defer channel.mutex.Unlock()
+					if channel.returnChan == nil {
+						channel.returnChan = channel.channel.NotifyReturn(make(chan amqp091.Return, 1))
+						go func() {
+							for r := range channel.returnChan {
+								go template.returnCallback(&Return{
+									ReplyCode:       r.ReplyCode,
+									ReplyText:       r.ReplyText,
+									Exchange:        r.Exchange,
+									RoutingKey:      r.RoutingKey,
+									ContentType:     r.ContentType,
+									ContentEncoding: r.ContentEncoding,
+									Headers:         r.Headers,
+									DeliveryMode:    r.DeliveryMode,
+									Priority:        r.Priority,
+									CorrelationId:   r.CorrelationId,
+									ReplyTo:         r.ReplyTo,
+									Expiration:      r.Expiration,
+									MessageId:       r.MessageId,
+									Timestamp:       r.Timestamp,
+									Type:            r.Type,
+									UserId:          r.UserId,
+									AppId:           r.AppId,
+									Body:            r.Body,
+								})
+							}
+						}()
+					}
+				}()
+			}
+		}
+	}
+	return nil
 }

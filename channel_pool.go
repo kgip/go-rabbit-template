@@ -14,6 +14,9 @@ type PoolChannel struct {
 	channel     *amqp091.Channel  //信道实体,不推荐手动关闭
 	isFree      bool              //信道是否空闲
 	freeChannel chan *PoolChannel //已经释放的信道会被放入
+	confirmChan chan amqp091.Confirmation
+	returnChan  chan amqp091.Return
+	mutex       *sync.Mutex
 }
 
 func (channel *PoolChannel) Close() (err error) {
@@ -87,6 +90,33 @@ func (pool *ChannelPool) GetChannel() (ch *PoolChannel, err error) {
 		return freeChannel, nil
 	default:
 	}
+
+	channel, err := pool.createNewChannel()
+	if err != nil {
+		return nil, err
+	} else if channel != nil {
+		return channel, nil
+	}
+	//无超时限制
+	if pool.timeout < 0 {
+		return <-pool.freeChannel, err
+	}
+	//从已创建的信道中获取空闲的信道，最多等待30s
+	timer := time.NewTimer(pool.timeout)
+	for {
+		select {
+		case freeChannel := <-pool.freeChannel:
+			if freeChannel != nil {
+				freeChannel.isFree = false
+			}
+			return freeChannel, nil
+		case <-timer.C:
+			return nil, errors.New("acquire channel timeout")
+		}
+	}
+}
+
+func (pool *ChannelPool) createNewChannel() (ch *PoolChannel, err error) {
 	pool.mux.Lock()
 	defer pool.mux.Unlock()
 	if pool.isClosed {
@@ -105,29 +135,13 @@ func (pool *ChannelPool) GetChannel() (ch *PoolChannel, err error) {
 			channel:     originChannel,
 			isFree:      false,
 			freeChannel: pool.freeChannel,
+			mutex:       &sync.Mutex{},
 		}
 		pool.channels[pool.channelCount] = channel
 		pool.channelCount++
 		return channel, nil
 	}
-	pool.mux.Unlock()
-	//无超时限制
-	if pool.timeout < 0 {
-		return <-pool.freeChannel, err
-	}
-	//从已创建的信道中获取空闲的信道，最多等待30s
-	timer := time.NewTimer(pool.timeout)
-	for {
-		select {
-		case freeChannel := <-pool.freeChannel:
-			if freeChannel != nil {
-				freeChannel.isFree = false
-			}
-			return freeChannel, nil
-		case <-timer.C:
-			return nil, errors.New("acquire channel timeout")
-		}
-	}
+	return nil, nil
 }
 
 // Close 关闭连接池
