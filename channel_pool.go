@@ -84,10 +84,10 @@ func (pool *ChannelPool) GetChannel() (ch *PoolChannel, err error) {
 	//先尝试获取空闲信道，如果获取到了直接返回
 	select {
 	case freeChannel := <-pool.freeChannel:
-		if freeChannel != nil {
+		if freeChannel != nil && !freeChannel.channel.IsClosed() {
 			freeChannel.isFree = false
+			return freeChannel, nil
 		}
-		return freeChannel, nil
 	default:
 	}
 
@@ -106,10 +106,10 @@ func (pool *ChannelPool) GetChannel() (ch *PoolChannel, err error) {
 	for {
 		select {
 		case freeChannel := <-pool.freeChannel:
-			if freeChannel != nil {
+			if freeChannel != nil && !freeChannel.channel.IsClosed() {
 				freeChannel.isFree = false
+				return freeChannel, nil
 			}
-			return freeChannel, nil
 		case <-timer.C:
 			return nil, errors.New("acquire channel timeout")
 		}

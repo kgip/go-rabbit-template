@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"github.com/patrickmn/go-cache"
 	"github.com/rabbitmq/amqp091-go"
+	"log"
 	"net"
+	"sync"
 	"time"
 )
 
@@ -210,14 +212,15 @@ type Message struct {
 
 // RabbitTemplate RabbitMQ操作工具
 type RabbitTemplate struct {
-	url                  string                                                              //amqp服务器连接地址
-	config               *Config                                                             //配置信息
-	connection           *amqp091.Connection                                                 //生产者连接
-	channelPool          *ChannelPool                                                        //信道池，用于根据连接创建信道
-	confirmCallback      func(ack bool, DeliveryTag int64, correlationData *CorrelationData) //确认回调
-	returnCallback       func(r *Return)                                                     //返回回调
-	correlationDataCache *cache.Cache                                                        //存储每个channel每个消息对应的CorrelationData
-	consumerCallbacks    []func(delivery *Delivery)                                          //消费者回调
+	url                  string                                                               //amqp服务器连接地址
+	config               *Config                                                              //配置信息
+	connection           *amqp091.Connection                                                  //生产者连接
+	channelPool          *ChannelPool                                                         //信道池，用于根据连接创建信道
+	confirmCallback      func(ack bool, DeliveryTag uint64, correlationData *CorrelationData) //确认回调
+	returnCallback       func(r *Return)                                                      //返回回调
+	correlationDataCache *cache.Cache                                                         //存储每个channel每个消息对应的CorrelationData
+	consumerCallbacks    []func(delivery *Delivery)                                           //消费者回调
+	mutex                *sync.Mutex
 }
 
 func NewRabbitTemplate(url string, config Config) (*RabbitTemplate, error) {
@@ -266,6 +269,7 @@ func NewRabbitTemplate(url string, config Config) (*RabbitTemplate, error) {
 		channelPool:          pool,
 		config:               &config,
 		correlationDataCache: cache.New(correlationDataExpire, 2*correlationDataExpire),
+		mutex:                &sync.Mutex{},
 	}, nil
 }
 
@@ -303,7 +307,75 @@ func (template *RabbitTemplate) Publish(exchange, key string, mandatory, immedia
 		return err
 	}
 	defer channel.Close()
-	if err = channel.channel.PublishWithContext(context.Background(), exchange, key, mandatory, immediate, amqp091.Publishing{
+	if template.config.EnablePublisherConfirm && template.confirmCallback != nil {
+		if channel.confirmChan == nil {
+			func() {
+				channel.mutex.Lock()
+				defer channel.mutex.Unlock()
+				if channel.confirmChan == nil {
+					channel.confirmChan = channel.channel.NotifyPublish(make(chan amqp091.Confirmation, 1))
+					//监听确认回调
+					go func() {
+						for confirmation := range channel.confirmChan {
+							cachedCorrelationDataKey := fmt.Sprintf("%v-%d", channel.confirmChan, confirmation.DeliveryTag)
+							data, exist := template.correlationDataCache.Get(cachedCorrelationDataKey)
+							if exist {
+								go template.confirmCallback(confirmation.Ack, confirmation.DeliveryTag, data.(*CorrelationData))
+							} else {
+								log.Println(fmt.Sprintf("Lost CorrelationData: channel: %v deliveryTag: %d ack: %v", channel.channel, confirmation.DeliveryTag, confirmation.Ack))
+							}
+						}
+					}()
+				}
+			}()
+		}
+	}
+	if template.config.EnablePublisherReturns && template.returnCallback != nil {
+		if channel.returnChan == nil {
+			func() {
+				channel.mutex.Lock()
+				defer channel.mutex.Unlock()
+				if channel.returnChan == nil {
+					channel.returnChan = channel.channel.NotifyReturn(make(chan amqp091.Return, 1))
+					go func() {
+						for r := range channel.returnChan {
+							go template.returnCallback(&Return{
+								ReplyCode:       r.ReplyCode,
+								ReplyText:       r.ReplyText,
+								Exchange:        r.Exchange,
+								RoutingKey:      r.RoutingKey,
+								ContentType:     r.ContentType,
+								ContentEncoding: r.ContentEncoding,
+								Headers:         r.Headers,
+								DeliveryMode:    r.DeliveryMode,
+								Priority:        r.Priority,
+								CorrelationId:   r.CorrelationId,
+								ReplyTo:         r.ReplyTo,
+								Expiration:      r.Expiration,
+								MessageId:       r.MessageId,
+								Timestamp:       r.Timestamp,
+								Type:            r.Type,
+								UserId:          r.UserId,
+								AppId:           r.AppId,
+								Body:            r.Body,
+							})
+						}
+					}()
+				}
+			}()
+		}
+	}
+	template.mutex.Lock()
+	defer template.mutex.Unlock()
+	//生成缓存key
+	cachedCorrelationDataKey := fmt.Sprintf("%v-%d", channel.confirmChan, channel.channel.GetNextPublishSeqNo())
+	//缓存correlationData
+	if correlationData.Expire <= 0 {
+		template.correlationDataCache.SetDefault(cachedCorrelationDataKey, correlationData)
+	} else {
+		template.correlationDataCache.Set(cachedCorrelationDataKey, correlationData, correlationData.Expire)
+	}
+	return channel.channel.PublishWithContext(context.Background(), exchange, key, mandatory, immediate, amqp091.Publishing{
 		Headers:         msg.Headers,
 		ContentType:     msg.ContentType,
 		ContentEncoding: msg.ContentEncoding,
@@ -318,63 +390,5 @@ func (template *RabbitTemplate) Publish(exchange, key string, mandatory, immedia
 		UserId:          msg.UserId,
 		AppId:           msg.AppId,
 		Body:            msg.Body,
-	}); err != nil {
-		return err
-	} else {
-		if template.config.EnablePublisherConfirm && template.confirmCallback != nil {
-			if channel.confirmChan == nil {
-				func() {
-					channel.mutex.Lock()
-					defer channel.mutex.Unlock()
-					if channel.confirmChan == nil {
-						channel.confirmChan = channel.channel.NotifyPublish(make(chan amqp091.Confirmation, 1))
-					}
-				}()
-			}
-			//生成缓存key
-			cachedCorrelationDataKey := fmt.Sprintf("%v-%d", channel.confirmChan, channel.channel.GetNextPublishSeqNo()-1)
-			//缓存correlationData
-			if correlationData.Expire <= 0 {
-				template.correlationDataCache.SetDefault(cachedCorrelationDataKey, correlationData)
-			} else {
-				template.correlationDataCache.Set(cachedCorrelationDataKey, correlationData, correlationData.Expire)
-			}
-		}
-		if template.config.EnablePublisherReturns && template.returnCallback != nil {
-			if channel.returnChan == nil {
-				func() {
-					channel.mutex.Lock()
-					defer channel.mutex.Unlock()
-					if channel.returnChan == nil {
-						channel.returnChan = channel.channel.NotifyReturn(make(chan amqp091.Return, 1))
-						go func() {
-							for r := range channel.returnChan {
-								go template.returnCallback(&Return{
-									ReplyCode:       r.ReplyCode,
-									ReplyText:       r.ReplyText,
-									Exchange:        r.Exchange,
-									RoutingKey:      r.RoutingKey,
-									ContentType:     r.ContentType,
-									ContentEncoding: r.ContentEncoding,
-									Headers:         r.Headers,
-									DeliveryMode:    r.DeliveryMode,
-									Priority:        r.Priority,
-									CorrelationId:   r.CorrelationId,
-									ReplyTo:         r.ReplyTo,
-									Expiration:      r.Expiration,
-									MessageId:       r.MessageId,
-									Timestamp:       r.Timestamp,
-									Type:            r.Type,
-									UserId:          r.UserId,
-									AppId:           r.AppId,
-									Body:            r.Body,
-								})
-							}
-						}()
-					}
-				}()
-			}
-		}
-	}
-	return nil
+	})
 }
