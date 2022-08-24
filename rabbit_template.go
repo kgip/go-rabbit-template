@@ -336,54 +336,50 @@ func (template *RabbitTemplate) Publish(exchange, key string, mandatory, immedia
 		return err
 	}
 	defer channel.Close()
-	if template.config.EnablePublisherConfirm && template.confirmCallback.Load() != nil {
-		if channel.confirmChan == nil {
-			channel.channel.Confirm(false)
-			channel.confirmChan = channel.channel.NotifyPublish(make(chan amqp091.Confirmation, 1))
-			//监听确认回调
-			go func() {
-				for confirmation := range channel.confirmChan {
-					cachedCorrelationDataKey := fmt.Sprintf("%v-%d", channel.confirmChan, confirmation.DeliveryTag)
-					data, exist := template.correlationDataCache.Get(cachedCorrelationDataKey)
-					if exist {
-						callback := template.confirmCallback.Load().(ConfirmCallback)
-						go callback(confirmation.Ack, confirmation.DeliveryTag, data.(*CorrelationData))
-					} else {
-						template.logger.Warn(fmt.Sprintf("Lost CorrelationData: channel: %v deliveryTag: %d ack: %v", channel.channel, confirmation.DeliveryTag, confirmation.Ack))
-					}
+	if template.config.EnablePublisherConfirm && template.confirmCallback.Load() != nil && channel.confirmChan == nil {
+		channel.channel.Confirm(false)
+		channel.confirmChan = channel.channel.NotifyPublish(make(chan amqp091.Confirmation, 1))
+		//监听确认回调
+		go func() {
+			for confirmation := range channel.confirmChan {
+				cachedCorrelationDataKey := fmt.Sprintf("%v-%d", channel.confirmChan, confirmation.DeliveryTag)
+				data, exist := template.correlationDataCache.Get(cachedCorrelationDataKey)
+				if exist {
+					callback := template.confirmCallback.Load().(ConfirmCallback)
+					go callback(confirmation.Ack, confirmation.DeliveryTag, data.(*CorrelationData))
+				} else {
+					template.logger.Warn(fmt.Sprintf("Lost CorrelationData: channel: %v deliveryTag: %d ack: %v", channel.channel, confirmation.DeliveryTag, confirmation.Ack))
 				}
-			}()
-		}
+			}
+		}()
 	}
-	if template.config.EnablePublisherReturns && template.returnCallback.Load() != nil {
-		if channel.returnChan == nil {
-			channel.returnChan = channel.channel.NotifyReturn(make(chan amqp091.Return, 1))
-			go func() {
-				for r := range channel.returnChan {
-					callback := template.returnCallback.Load().(ReturnCallback)
-					go callback(&Return{
-						ReplyCode:       r.ReplyCode,
-						ReplyText:       r.ReplyText,
-						Exchange:        r.Exchange,
-						RoutingKey:      r.RoutingKey,
-						ContentType:     r.ContentType,
-						ContentEncoding: r.ContentEncoding,
-						Headers:         r.Headers,
-						DeliveryMode:    r.DeliveryMode,
-						Priority:        r.Priority,
-						CorrelationId:   r.CorrelationId,
-						ReplyTo:         r.ReplyTo,
-						Expiration:      r.Expiration,
-						MessageId:       r.MessageId,
-						Timestamp:       r.Timestamp,
-						Type:            r.Type,
-						UserId:          r.UserId,
-						AppId:           r.AppId,
-						Body:            r.Body,
-					})
-				}
-			}()
-		}
+	if template.config.EnablePublisherReturns && template.returnCallback.Load() != nil && channel.returnChan == nil {
+		channel.returnChan = channel.channel.NotifyReturn(make(chan amqp091.Return, 1))
+		go func() {
+			for r := range channel.returnChan {
+				callback := template.returnCallback.Load().(ReturnCallback)
+				go callback(&Return{
+					ReplyCode:       r.ReplyCode,
+					ReplyText:       r.ReplyText,
+					Exchange:        r.Exchange,
+					RoutingKey:      r.RoutingKey,
+					ContentType:     r.ContentType,
+					ContentEncoding: r.ContentEncoding,
+					Headers:         r.Headers,
+					DeliveryMode:    r.DeliveryMode,
+					Priority:        r.Priority,
+					CorrelationId:   r.CorrelationId,
+					ReplyTo:         r.ReplyTo,
+					Expiration:      r.Expiration,
+					MessageId:       r.MessageId,
+					Timestamp:       r.Timestamp,
+					Type:            r.Type,
+					UserId:          r.UserId,
+					AppId:           r.AppId,
+					Body:            r.Body,
+				})
+			}
+		}()
 	}
 	//生成缓存key
 	cachedCorrelationDataKey := fmt.Sprintf("%v-%d", channel.confirmChan, channel.channel.GetNextPublishSeqNo())
