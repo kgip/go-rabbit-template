@@ -285,7 +285,7 @@ func (template *RabbitTemplate) ExchangeDeclare(name, kind string, durable, auto
 	defer channel.Close()
 	err = channel.channel.ExchangeDeclare(name, kind, durable, autoDelete, internal, noWait, args)
 	if err != nil {
-		template.logger.Error("Create exchange '%s' failed", name)
+		template.logger.Error("Failed to create exchange '%s'", name)
 	} else {
 		template.logger.Info("Create exchange '%s' complete", name)
 	}
@@ -300,7 +300,7 @@ func (template *RabbitTemplate) QueueDeclare(name string, durable, autoDelete, e
 	defer channel.Close()
 	_, err = channel.channel.QueueDeclare(name, durable, autoDelete, exclusive, noWait, args)
 	if err != nil {
-		template.logger.Error("Create queue '%s' failed", name)
+		template.logger.Error("Failed to create queue '%s'", name)
 	} else {
 		template.logger.Info("Create queue '%s' complete", name)
 	}
@@ -315,7 +315,7 @@ func (template *RabbitTemplate) QueueBind(name, key, exchange string, noWait boo
 	defer channel.Close()
 	err = channel.channel.QueueBind(name, key, exchange, noWait, args)
 	if err != nil {
-		template.logger.Error("Create queuebind '%s' failed", exchange+"--"+key+"-->"+name)
+		template.logger.Error("Failed to create queuebind '%s'", exchange+"--"+key+"-->"+name)
 	} else {
 		template.logger.Info("Create queuebind '%s' complete", exchange+"--"+key+"-->"+name)
 	}
