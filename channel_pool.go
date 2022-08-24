@@ -85,7 +85,7 @@ func NewChannelPool(conn *amqp091.Connection, maxChannelCount uint, timeout time
 func (pool *ChannelPool) GetChannel() (ch *PoolChannel, err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			log.Println(r)
+			pool.logger.Error(fmt.Sprintf("%v", r))
 			if er, ok := r.(error); ok {
 				err = er
 			} else {
