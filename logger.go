@@ -28,7 +28,7 @@ type Logger interface {
 }
 
 func Zap() (logger *zap.Logger) {
-	level = zapcore.InfoLevel
+	level = zapcore.DebugLevel
 	logger = zap.New(getEncoderCore(), zap.AddStacktrace(level))
 	logger = logger.WithOptions(zap.AddCaller(), zap.AddCallerSkip(1))
 	return logger
