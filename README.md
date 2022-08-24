@@ -1,0 +1,2 @@
+# go-rabbit-template
+init
