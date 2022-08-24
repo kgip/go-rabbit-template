@@ -1,14 +1,15 @@
-package rabbit_template
+package rabbitmq
 
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"fmt"
 	"github.com/patrickmn/go-cache"
 	"github.com/rabbitmq/amqp091-go"
-	"log"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -93,6 +94,7 @@ type Config struct {
 	PoolChannelMax         int           //连接池最大channel数
 	Timeout                time.Duration //连接获取超时时间，小于0时无超时限制
 	CorrelationDataExpire  time.Duration
+	Logger                 Logger
 }
 
 // Return captures a flattened struct of fields returned by the server when a
@@ -131,22 +133,6 @@ type AcknowledgerAdapter interface {
 	Reject(tag uint64, requeue bool) error
 }
 
-type Acknowledger struct {
-	acknowledger amqp091.Acknowledger
-}
-
-func (acknowledger *Acknowledger) Ack(tag uint64, multiple bool) error {
-	return acknowledger.acknowledger.Ack(tag, multiple)
-}
-
-func (acknowledger *Acknowledger) Nack(tag uint64, multiple bool, requeue bool) error {
-	return acknowledger.acknowledger.Nack(tag, multiple, requeue)
-}
-
-func (acknowledger *Acknowledger) Reject(tag uint64, requeue bool) error {
-	return acknowledger.acknowledger.Reject(tag, requeue)
-}
-
 // Delivery captures the fields for a previously delivered message resident in
 // a queue to be delivered by the server to a consumer from Channel.Consume or
 // Channel.Get.
@@ -183,6 +169,8 @@ type Delivery struct {
 	Body []byte
 }
 
+type Consumer func(delivery *Delivery)
+
 // Message captures the client message sent to the server.  The fields
 // outside of the Headers table included in this struct mirror the underlying
 // fields in the content frame.  They use native types for convenience and
@@ -210,17 +198,22 @@ type Message struct {
 	Body []byte
 }
 
+type ConfirmCallback func(ack bool, DeliveryTag uint64, correlationData *CorrelationData)
+
+type ReturnCallback func(r *Return)
+
 // RabbitTemplate RabbitMQ操作工具
 type RabbitTemplate struct {
-	url                  string                                                               //amqp服务器连接地址
-	config               *Config                                                              //配置信息
-	connection           *amqp091.Connection                                                  //生产者连接
-	channelPool          *ChannelPool                                                         //信道池，用于根据连接创建信道
-	confirmCallback      func(ack bool, DeliveryTag uint64, correlationData *CorrelationData) //确认回调
-	returnCallback       func(r *Return)                                                      //返回回调
-	correlationDataCache *cache.Cache                                                         //存储每个channel每个消息对应的CorrelationData
-	consumerCallbacks    []func(delivery *Delivery)                                           //消费者回调
+	url                  string              //amqp服务器连接地址
+	config               *Config             //配置信息
+	connection           *amqp091.Connection //生产者连接
+	channelPool          *ChannelPool        //信道池，用于根据连接创建信道
+	confirmCallback      *atomic.Value       //确认回调
+	returnCallback       *atomic.Value       //返回回调
+	correlationDataCache *cache.Cache        //存储每个channel每个消息对应的CorrelationData
+	consumerCallbacks    []Consumer          //消费者回调
 	mutex                *sync.Mutex
+	logger               Logger
 }
 
 func NewRabbitTemplate(url string, config Config) (*RabbitTemplate, error) {
@@ -249,7 +242,13 @@ func NewRabbitTemplate(url string, config Config) (*RabbitTemplate, error) {
 	if config.PoolChannelMax <= 0 {
 		poolChannelMax = defaultPoolChannelMax
 	}
-	pool, err := NewChannelPool(connection, poolChannelMax, config.Timeout)
+	if config.Logger == nil {
+		config.Logger = &DefaultLogger{
+			Level: Info,
+			Log:   Zap(),
+		}
+	}
+	pool, err := NewChannelPool(connection, poolChannelMax, config.Timeout, config.Logger)
 
 	if err != nil {
 		return nil, err
@@ -269,7 +268,10 @@ func NewRabbitTemplate(url string, config Config) (*RabbitTemplate, error) {
 		channelPool:          pool,
 		config:               &config,
 		correlationDataCache: cache.New(correlationDataExpire, 2*correlationDataExpire),
+		confirmCallback:      &atomic.Value{},
+		returnCallback:       &atomic.Value{},
 		mutex:                &sync.Mutex{},
+		logger:               config.Logger,
 	}, nil
 }
 
@@ -279,7 +281,13 @@ func (template *RabbitTemplate) ExchangeDeclare(name, kind string, durable, auto
 		return err
 	}
 	defer channel.Close()
-	return channel.channel.ExchangeDeclare(name, kind, durable, autoDelete, internal, noWait, args)
+	err = channel.channel.ExchangeDeclare(name, kind, durable, autoDelete, internal, noWait, args)
+	if err != nil {
+		template.logger.Error("Create exchange '%s' failed", name)
+	} else {
+		template.logger.Info("Create exchange '%s' complete", name)
+	}
+	return err
 }
 
 func (template *RabbitTemplate) QueueDeclare(name string, durable, autoDelete, exclusive, noWait bool, args map[string]interface{}) error {
@@ -289,6 +297,11 @@ func (template *RabbitTemplate) QueueDeclare(name string, durable, autoDelete, e
 	}
 	defer channel.Close()
 	_, err = channel.channel.QueueDeclare(name, durable, autoDelete, exclusive, noWait, args)
+	if err != nil {
+		template.logger.Error("Create queue '%s' failed", name)
+	} else {
+		template.logger.Info("Create queue '%s' complete", name)
+	}
 	return err
 }
 
@@ -298,7 +311,21 @@ func (template *RabbitTemplate) QueueBind(name, key, exchange string, noWait boo
 		return err
 	}
 	defer channel.Close()
-	return channel.channel.QueueBind(name, key, exchange, noWait, args)
+	err = channel.channel.QueueBind(name, key, exchange, noWait, args)
+	if err != nil {
+		template.logger.Error("Create queuebind '%s' failed", exchange+"--"+key+"-->"+name)
+	} else {
+		template.logger.Info("Create queuebind '%s' complete", exchange+"--"+key+"-->"+name)
+	}
+	return err
+}
+
+func (template *RabbitTemplate) RegisterConfirmCallback(callback ConfirmCallback) {
+	template.confirmCallback.Store(callback)
+}
+
+func (template *RabbitTemplate) RegisterReturnCallback(callback ReturnCallback) {
+	template.returnCallback.Store(callback)
 }
 
 func (template *RabbitTemplate) Publish(exchange, key string, mandatory, immediate bool, msg *Message, correlationData *CorrelationData) error {
@@ -307,12 +334,13 @@ func (template *RabbitTemplate) Publish(exchange, key string, mandatory, immedia
 		return err
 	}
 	defer channel.Close()
-	if template.config.EnablePublisherConfirm && template.confirmCallback != nil {
+	if template.config.EnablePublisherConfirm && template.confirmCallback.Load() != nil {
 		if channel.confirmChan == nil {
 			func() {
 				channel.mutex.Lock()
 				defer channel.mutex.Unlock()
 				if channel.confirmChan == nil {
+					channel.channel.Confirm(false)
 					channel.confirmChan = channel.channel.NotifyPublish(make(chan amqp091.Confirmation, 1))
 					//监听确认回调
 					go func() {
@@ -320,9 +348,10 @@ func (template *RabbitTemplate) Publish(exchange, key string, mandatory, immedia
 							cachedCorrelationDataKey := fmt.Sprintf("%v-%d", channel.confirmChan, confirmation.DeliveryTag)
 							data, exist := template.correlationDataCache.Get(cachedCorrelationDataKey)
 							if exist {
-								go template.confirmCallback(confirmation.Ack, confirmation.DeliveryTag, data.(*CorrelationData))
+								callback := template.confirmCallback.Load().(ConfirmCallback)
+								go callback(confirmation.Ack, confirmation.DeliveryTag, data.(*CorrelationData))
 							} else {
-								log.Println(fmt.Sprintf("Lost CorrelationData: channel: %v deliveryTag: %d ack: %v", channel.channel, confirmation.DeliveryTag, confirmation.Ack))
+								template.logger.Warn(fmt.Sprintf("Lost CorrelationData: channel: %v deliveryTag: %d ack: %v", channel.channel, confirmation.DeliveryTag, confirmation.Ack))
 							}
 						}
 					}()
@@ -330,7 +359,7 @@ func (template *RabbitTemplate) Publish(exchange, key string, mandatory, immedia
 			}()
 		}
 	}
-	if template.config.EnablePublisherReturns && template.returnCallback != nil {
+	if template.config.EnablePublisherReturns && template.returnCallback.Load() != nil {
 		if channel.returnChan == nil {
 			func() {
 				channel.mutex.Lock()
@@ -339,7 +368,8 @@ func (template *RabbitTemplate) Publish(exchange, key string, mandatory, immedia
 					channel.returnChan = channel.channel.NotifyReturn(make(chan amqp091.Return, 1))
 					go func() {
 						for r := range channel.returnChan {
-							go template.returnCallback(&Return{
+							callback := template.returnCallback.Load().(ReturnCallback)
+							go callback(&Return{
 								ReplyCode:       r.ReplyCode,
 								ReplyText:       r.ReplyText,
 								Exchange:        r.Exchange,
@@ -391,4 +421,71 @@ func (template *RabbitTemplate) Publish(exchange, key string, mandatory, immedia
 		AppId:           msg.AppId,
 		Body:            msg.Body,
 	})
+}
+
+func (template *RabbitTemplate) SimplePublish(exchange, key string, data interface{}, correlationData *CorrelationData) error {
+	bytes, err := json.Marshal(data)
+	if err != nil {
+		return err
+	}
+	return template.Publish(exchange, key, template.config.EnablePublisherReturns && template.returnCallback.Load() != nil, false, &Message{
+		ContentEncoding: "utf-8",
+		ContentType:     "application/json",
+		Timestamp:       time.Now(),
+		DeliveryMode:    amqp091.Persistent,
+		Body:            bytes,
+	}, correlationData)
+}
+
+func (template *RabbitTemplate) RegisterConsumer(queue, consumer string, autoAck, exclusive, noLocal, noWait bool, args map[string]interface{}, consumerHandler Consumer) error {
+	channel, err := template.channelPool.GetChannel()
+	if err != nil {
+		return err
+	}
+	defer channel.Close()
+	deliveries, err := channel.channel.Consume(queue, consumer, autoAck, exclusive, noLocal, noWait, args)
+	if err != nil {
+		return err
+	}
+	go func() {
+		for delivery := range deliveries {
+			template.handleError(consumerHandler, &Delivery{
+				Acknowledger:    delivery.Acknowledger,
+				Headers:         delivery.Headers,
+				ContentType:     delivery.ContentType,
+				ContentEncoding: delivery.ContentEncoding,
+				DeliveryMode:    delivery.DeliveryMode,
+				Priority:        delivery.Priority,
+				CorrelationId:   delivery.CorrelationId,
+				ReplyTo:         delivery.ReplyTo,
+				Expiration:      delivery.Expiration,
+				MessageId:       delivery.MessageId,
+				Timestamp:       delivery.Timestamp,
+				Type:            delivery.Type,
+				UserId:          delivery.UserId,
+				AppId:           delivery.AppId,
+				ConsumerTag:     delivery.ConsumerTag,
+				MessageCount:    delivery.MessageCount,
+				DeliveryTag:     delivery.DeliveryTag,
+				Redelivered:     delivery.Redelivered,
+				Exchange:        delivery.Exchange,
+				RoutingKey:      delivery.RoutingKey,
+				Body:            delivery.Body,
+			})
+		}
+	}()
+	return nil
+}
+
+func (template *RabbitTemplate) SimpleRegisterConsumer(queue, consumer string, consumerHandler Consumer) error {
+	return template.RegisterConsumer(queue, consumer, false, false, false, false, nil, consumerHandler)
+}
+
+func (template *RabbitTemplate) handleError(consumerHandler Consumer, delivery *Delivery) {
+	defer func() {
+		if r := recover(); r != nil {
+			template.logger.Warn(fmt.Sprintf("%v", r))
+		}
+	}()
+	consumerHandler(delivery)
 }

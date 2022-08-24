@@ -1,4 +1,4 @@
-package rabbit_template
+package rabbitmq
 
 import (
 	"context"
@@ -14,7 +14,7 @@ func TestChannel(t *testing.T) {
 	var key = "test"
 	//var queue = "test.queue"
 	connection, _ := amqp091.DialConfig("amqp://guest:guest@192.168.31.24", amqp091.Config{Heartbeat: 60 * time.Second})
-	pool, _ := NewChannelPool(connection, 100, 10*time.Second)
+	pool, _ := NewChannelPool(connection, 100, 10*time.Second, nil)
 	wg := &sync.WaitGroup{}
 	wg.Add(5000)
 	for i := 0; i < 5000; i++ {

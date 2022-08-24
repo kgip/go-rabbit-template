@@ -1,4 +1,4 @@
-package rabbit_template
+package rabbitmq
 
 import (
 	"errors"
@@ -7,6 +7,10 @@ import (
 	"log"
 	"sync"
 	"time"
+)
+
+const (
+	defaultTimeout = 10 * time.Second
 )
 
 // PoolChannel 连接池包装的信道
@@ -45,25 +49,36 @@ type ChannelPool struct {
 	timeout         time.Duration     //获取信道的超时时间
 	freeChannel     chan *PoolChannel //已经释放的信道会被放入
 	isClosed        bool              //连接池是否关闭
+	logger          Logger
 }
 
 // NewChannelPool 创建一个连接池
 // conn amqp连接
 // maxChannelCount 连接池最大连接数
 // timeout 获取连接的
-func NewChannelPool(conn *amqp091.Connection, maxChannelCount int, timeout time.Duration) (*ChannelPool, error) {
+func NewChannelPool(conn *amqp091.Connection, maxChannelCount int, timeout time.Duration, logger Logger) (*ChannelPool, error) {
 	if conn == nil {
 		return nil, errors.New("'conn' is nil")
 	}
 	if maxChannelCount <= 0 {
 		return nil, errors.New("'maxChannelCount' is less than 0")
 	}
+	if timeout == 0 {
+		timeout = defaultTimeout
+	}
+	if logger == nil {
+		logger = &DefaultLogger{
+			Level: Info,
+			Log:   Zap(),
+		}
+	}
 	return &ChannelPool{conn: conn,
 		maxChannelCount: maxChannelCount,
 		channels:        make([]*PoolChannel, maxChannelCount),
 		mux:             &sync.Mutex{},
 		timeout:         timeout,
-		freeChannel:     make(chan *PoolChannel, maxChannelCount)}, nil
+		freeChannel:     make(chan *PoolChannel, maxChannelCount),
+		logger:          logger}, nil
 }
 
 // GetChannel 从连接池获取信道
@@ -128,7 +143,7 @@ func (pool *ChannelPool) createNewChannel() (ch *PoolChannel, err error) {
 		//根据连创建一个信道
 		originChannel, err = pool.conn.Channel()
 		if err != nil {
-			log.Println(err)
+			pool.logger.Error(err.Error())
 			return nil, err
 		}
 		channel := &PoolChannel{
@@ -154,7 +169,7 @@ func (pool *ChannelPool) Close() (err error) {
 	for _, channel := range pool.channels {
 		if channel != nil {
 			if e := channel.channel.Close(); e != nil {
-				log.Println(e)
+				pool.logger.Error(e.Error())
 			}
 		}
 	}
