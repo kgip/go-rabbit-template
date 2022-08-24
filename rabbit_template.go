@@ -397,8 +397,6 @@ func (template *RabbitTemplate) Publish(exchange, key string, mandatory, immedia
 			}()
 		}
 	}
-	template.mutex.Lock()
-	defer template.mutex.Unlock()
 	//生成缓存key
 	cachedCorrelationDataKey := fmt.Sprintf("%v-%d", channel.confirmChan, channel.channel.GetNextPublishSeqNo())
 	//缓存correlationData
