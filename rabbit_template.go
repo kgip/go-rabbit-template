@@ -91,7 +91,7 @@ type Config struct {
 	//channel pool config
 	EnablePublisherConfirm bool
 	EnablePublisherReturns bool
-	PoolChannelMax         int           //连接池最大channel数
+	PoolChannelMax         uint          //连接池最大channel数
 	Timeout                time.Duration //连接获取超时时间，小于0时无超时限制
 	CorrelationDataExpire  time.Duration
 	Logger                 Logger
@@ -249,7 +249,6 @@ func NewRabbitTemplate(url string, config Config) (*RabbitTemplate, error) {
 		}
 	}
 	pool, err := NewChannelPool(connection, poolChannelMax, config.Timeout, config.Logger)
-
 	if err != nil {
 		return nil, err
 	}

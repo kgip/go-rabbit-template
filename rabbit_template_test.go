@@ -40,7 +40,3 @@ func TestRabbitTemplate_QueueBind(t *testing.T) {
 		}
 	}
 }
-
-func TestRabbitTemplate_Publish(t *testing.T) {
-
-}

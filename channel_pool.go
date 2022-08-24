@@ -43,8 +43,8 @@ func (channel *PoolChannel) Close() (err error) {
 type ChannelPool struct {
 	conn            *amqp091.Connection
 	channels        []*PoolChannel
-	maxChannelCount int //最大信道数量
-	channelCount    int //当前信道数量
+	maxChannelCount uint //最大信道数量
+	channelCount    uint //当前信道数量
 	mux             *sync.Mutex
 	timeout         time.Duration     //获取信道的超时时间
 	freeChannel     chan *PoolChannel //已经释放的信道会被放入
@@ -56,7 +56,7 @@ type ChannelPool struct {
 // conn amqp连接
 // maxChannelCount 连接池最大连接数
 // timeout 获取连接的
-func NewChannelPool(conn *amqp091.Connection, maxChannelCount int, timeout time.Duration, logger Logger) (*ChannelPool, error) {
+func NewChannelPool(conn *amqp091.Connection, maxChannelCount uint, timeout time.Duration, logger Logger) (*ChannelPool, error) {
 	if conn == nil {
 		return nil, errors.New("'conn' is nil")
 	}

@@ -30,19 +30,19 @@ type Logger interface {
 func Zap() (logger *zap.Logger) {
 	level = zapcore.InfoLevel
 	logger = zap.New(getEncoderCore(), zap.AddStacktrace(level))
-	logger = logger.WithOptions(zap.AddCaller())
+	logger = logger.WithOptions(zap.AddCaller(), zap.AddCallerSkip(1))
 	return logger
 }
 
 // getEncoderConfig 获取zapcore.EncoderConfig
 func getEncoderConfig() (config zapcore.EncoderConfig) {
 	config = zapcore.EncoderConfig{
-		MessageKey:     "message",
-		LevelKey:       "level",
-		TimeKey:        "time",
-		NameKey:        "logger",
-		CallerKey:      "caller",
-		StacktraceKey:  "stacktrace",
+		MessageKey: "message",
+		LevelKey:   "level",
+		TimeKey:    "time",
+		NameKey:    "logger",
+		CallerKey:  "caller",
+		//StacktraceKey:  "stacktrace",
 		LineEnding:     zapcore.DefaultLineEnding,
 		EncodeLevel:    zapcore.LowercaseLevelEncoder,
 		EncodeTime:     CustomTimeEncoder,
