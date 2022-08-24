@@ -1,4 +1,4 @@
-module go-rabbit-template
+module github.com/kgip/go-rabbit-template
 
 go 1.16
 
