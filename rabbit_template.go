@@ -242,6 +242,9 @@ func NewRabbitTemplate(url string, config Config) (*RabbitTemplate, error) {
 	if config.PoolChannelMax <= 0 {
 		poolChannelMax = defaultPoolChannelMax
 	}
+	if int(poolChannelMax) > config.ChannelMax && config.ChannelMax > 0 {
+		poolChannelMax = uint(config.ChannelMax)
+	}
 	if config.Logger == nil {
 		config.Logger = &DefaultLogger{
 			Level: Info,
