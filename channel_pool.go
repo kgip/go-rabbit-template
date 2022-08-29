@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/rabbitmq/amqp091-go"
+	uuid "github.com/satori/go.uuid"
 	"log"
 	"sync"
 	"time"
@@ -19,6 +20,7 @@ type PoolChannel struct {
 	isFree      bool              //信道是否空闲
 	freeChannel chan *PoolChannel //已经释放的信道会被放入
 	confirmChan chan amqp091.Confirmation
+	channelId   string
 	returnChan  chan amqp091.Return
 	mutex       *sync.Mutex
 }
@@ -151,6 +153,7 @@ func (pool *ChannelPool) createNewChannel() (ch *PoolChannel, err error) {
 			isFree:      false,
 			freeChannel: pool.freeChannel,
 			mutex:       &sync.Mutex{},
+			channelId:   uuid.NewV4().String(),
 		}
 		pool.channels[pool.channelCount] = channel
 		pool.channelCount++

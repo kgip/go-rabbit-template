@@ -342,7 +342,7 @@ func (template *RabbitTemplate) Publish(exchange, key string, mandatory, immedia
 		//监听确认回调
 		go func() {
 			for confirmation := range channel.confirmChan {
-				cachedCorrelationDataKey := fmt.Sprintf("%v-%d", channel.confirmChan, confirmation.DeliveryTag)
+				cachedCorrelationDataKey := fmt.Sprintf("%v-%d", channel.channelId, confirmation.DeliveryTag)
 				data, exist := template.correlationDataCache.Get(cachedCorrelationDataKey)
 				if exist {
 					callback := template.confirmCallback.Load().(ConfirmCallback)
@@ -382,7 +382,7 @@ func (template *RabbitTemplate) Publish(exchange, key string, mandatory, immedia
 		}()
 	}
 	//生成缓存key
-	cachedCorrelationDataKey := fmt.Sprintf("%v-%d", channel.confirmChan, channel.channel.GetNextPublishSeqNo())
+	cachedCorrelationDataKey := fmt.Sprintf("%v-%d", channel.channelId, channel.channel.GetNextPublishSeqNo())
 	//缓存correlationData
 	if correlationData.Expire <= 0 {
 		template.correlationDataCache.SetDefault(cachedCorrelationDataKey, correlationData)
