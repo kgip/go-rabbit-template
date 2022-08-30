@@ -14,7 +14,7 @@ reference (https://godoc.org/github.com/wagslane/go-rabbitmq)
 Inside a Go module:
 
 ```bash
-go get github.com/kgip/go-rabbit-templa
+go get github.com/kgip/go-rabbit-template
 ```
 
 ## 🚀 Quick Start Consumer
