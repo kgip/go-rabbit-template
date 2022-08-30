@@ -52,6 +52,11 @@ func (auth *AuthenticationProxy) Response() string {
 	return auth.auth.Response()
 }
 
+type Qos struct {
+	PrefetchCount uint // 在一条channel上未响应的最大消息数，0表示不生效
+	PrefetchSize  uint // 在一条channel上未响应的消息总字节数，0表示不生效
+}
+
 type Config struct {
 	// The SASL mechanisms to try in the client request, and the successful
 	// mechanism used on the Connection object.
@@ -94,6 +99,7 @@ type Config struct {
 	PoolChannelMax         uint          //连接池最大channel数
 	Timeout                time.Duration //连接获取超时时间，小于0时无超时限制
 	CorrelationDataExpire  time.Duration
+	Qos                    *Qos
 	Logger                 Logger
 }
 
@@ -421,12 +427,17 @@ func (template *RabbitTemplate) SimplePublish(exchange, key string, data interfa
 	}, correlationData)
 }
 
-func (template *RabbitTemplate) RegisterConsumer(queue, consumer string, autoAck, exclusive, noLocal, noWait bool, args map[string]interface{}, consumerHandler Consumer) error {
+func (template *RabbitTemplate) RegisterConsumer(queue, consumer string, autoAck, exclusive, noLocal, noWait bool, qos *Qos, args map[string]interface{}, consumerHandler Consumer) error {
 	channel, err := template.channelPool.GetChannel()
 	if err != nil {
 		return err
 	}
-	defer channel.Close()
+	if qos != nil {
+		channel.channel.Qos(int(qos.PrefetchCount), int(qos.PrefetchSize), false)
+	} else if template.config.Qos != nil {
+		channel.channel.Qos(int(template.config.Qos.PrefetchCount), int(template.config.Qos.PrefetchSize), false)
+	}
+	//defer channel.Close()
 	deliveries, err := channel.channel.Consume(queue, consumer, autoAck, exclusive, noLocal, noWait, args)
 	if err != nil {
 		return err
@@ -462,7 +473,7 @@ func (template *RabbitTemplate) RegisterConsumer(queue, consumer string, autoAck
 }
 
 func (template *RabbitTemplate) SimpleRegisterConsumer(queue, consumer string, consumerHandler Consumer) error {
-	return template.RegisterConsumer(queue, consumer, false, false, false, false, nil, consumerHandler)
+	return template.RegisterConsumer(queue, consumer, false, false, false, false, nil, nil, consumerHandler)
 }
 
 func (template *RabbitTemplate) handleError(consumerHandler Consumer, delivery *Delivery) {
